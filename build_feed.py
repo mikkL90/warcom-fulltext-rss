@@ -29,7 +29,7 @@ OUTPUT_PATH = Path(__file__).parent / "docs" / "feed.xml"
 MAX_ITEMS = 60
 REQUEST_DELAY_SECONDS = 1.5  # be polite to the origin site
 FEED_TITLE = "Warhammer Community (Full Text)"
-FEED_SELF_URL = "https://REPLACE_WITH_YOUR_PAGES_URL/feed.xml"
+FEED_SELF_URL = "https://mikkl90.github.io/warcom-fulltext-rss/feed.xml"
 FEED_HOME_URL = "https://www.warhammer-community.com/"
 FEED_DESCRIPTION = "Unofficial full-text mirror of Warhammer Community news, generated for personal RSS reading."
 
