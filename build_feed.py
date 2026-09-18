@@ -2,11 +2,13 @@
 """
 Builds a full-text RSS feed for Warhammer Community.
 
-Source of truth for "what's new" is the unofficial warcomfeed.link RSS feed
-(title/link/date/category). For each article we don't already have cached,
-we fetch the real article page and pull out the full body + images, then
-emit an RSS 2.0 feed with <content:encoded> so readers like Reeder show the
-complete article instead of just a summary.
+"What's new" is discovered directly from the Warhammer Community homepage
+(no third-party feed in the loop - a previous version relied on
+warcomfeed.link, which quietly stopped updating). For each article we
+don't already have cached, we fetch the real article page and pull out
+the title, publish date, hero image and full body, then emit an RSS 2.0
+feed with <content:encoded> so readers like Reeder show the complete
+article instead of just a summary.
 
 No third-party dependencies: stdlib only (urllib + re), so it runs anywhere,
 including a bare GitHub Actions runner.
@@ -20,24 +22,66 @@ import urllib.error
 import xml.sax.saxutils as sax
 from pathlib import Path
 from datetime import datetime, timezone
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 
-SOURCE_FEED = "https://warcomfeed.link/rss.xml"
+HOME_URL = "https://www.warhammer-community.com/en-gb/"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 CACHE_PATH = Path(__file__).parent / "cache.json"
 OUTPUT_PATH = Path(__file__).parent / "docs" / "feed.xml"
 MAX_ITEMS = 60
+DISCOVER_LIMIT = 30  # how many latest links to look at on the homepage each run
 REQUEST_DELAY_SECONDS = 1.5  # be polite to the origin site
 FEED_TITLE = "Warhammer Community (Full Text)"
 FEED_SELF_URL = "https://mikkl90.github.io/warcom-fulltext-rss/feed.xml"
 FEED_HOME_URL = "https://www.warhammer-community.com/"
 FEED_DESCRIPTION = "Unofficial full-text mirror of Warhammer Community news, generated for personal RSS reading."
 
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+ARTICLE_LINK_RE = re.compile(r'href="(/en-gb/articles/[a-zA-Z0-9]+/[^"?#]+/)"')
+DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{2,4})\b")
+
 
 def fetch(url: str, timeout: int = 20) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
+
+
+def discover_latest_articles(limit: int = DISCOVER_LIMIT):
+    """Return absolute article URLs in the order they first appear on the homepage."""
+    html = fetch(HOME_URL).decode("utf-8", errors="replace")
+    seen = []
+    for m in ARTICLE_LINK_RE.finditer(html):
+        url = "https://www.warhammer-community.com" + m.group(1)
+        if url not in seen:
+            seen.append(url)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def parse_article_date(html: str):
+    """The article's own publish date is the first <time> element on the page."""
+    m = re.search(r"<time[^>]*>([^<]*)</time>", html)
+    if not m:
+        return None
+    dm = DATE_RE.search(m.group(1))
+    if not dm:
+        return None
+    day, month_word, year = dm.groups()
+    month = MONTHS.get(month_word[:3].lower())
+    if not month:
+        return None
+    year = int(year)
+    if year < 100:
+        year += 2000
+    try:
+        return datetime(year, month, int(day), tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def extract_balanced_div(html: str, class_name: str):
@@ -67,7 +111,7 @@ def clean_article_html(fragment: str) -> str:
 
 
 def scrape_article(url: str):
-    """Fetch one article page and return (title, hero_image_url, content_html) or None on failure."""
+    """Fetch one article page and return its title/date/hero/description/content, or None on failure."""
     page_url = url if url.endswith("/") else url + "/"
     try:
         html = fetch(page_url).decode("utf-8", errors="replace")
@@ -77,6 +121,9 @@ def scrape_article(url: str):
 
     title_m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.S)
     title = re.sub(r"<[^>]+>", "", title_m.group(1)).strip() if title_m else None
+
+    desc_m = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', html)
+    description = desc_m.group(1) if desc_m else ""
 
     hero_url = None
     hero_section_m = re.search(r'<section[^>]*class="[^"]*\barticle-hero\b[^"]*"[^>]*>(.*?)</section>', html, re.S)
@@ -90,32 +137,15 @@ def scrape_article(url: str):
         return None
     content = clean_article_html(content)
 
-    return {"title": title, "hero": hero_url, "content": content}
+    pub_date = parse_article_date(html)
 
-
-def parse_source_feed(xml_text: str):
-    items = []
-    for block in re.findall(r"<item>(.*?)</item>", xml_text, re.S):
-        def field(tag):
-            m = re.search(rf"<{tag}[^>]*>\s*(?:<!\[CDATA\[(.*?)\]\]>|(.*?))\s*</{tag}>", block, re.S)
-            if not m:
-                return ""
-            return (m.group(1) or m.group(2) or "").strip()
-
-        link = field("link")
-        if not link:
-            continue
-        enclosure_m = re.search(r'<enclosure[^>]+url="([^"]+)"', block)
-        items.append({
-            "title": field("title"),
-            "link": link,
-            "guid": field("guid") or link,
-            "description": field("description"),
-            "pubDate": field("pubDate"),
-            "category": field("category"),
-            "enclosure": enclosure_m.group(1) if enclosure_m else None,
-        })
-    return items
+    return {
+        "title": title,
+        "description": description,
+        "hero": hero_url,
+        "content": content,
+        "pub_date": pub_date,
+    }
 
 
 def load_cache():
@@ -125,9 +155,7 @@ def load_cache():
 
 
 def save_cache(cache: dict):
-    # keep the cache file bounded to what the feed actually needs
-    trimmed = dict(list(cache.items())[:MAX_ITEMS])
-    CACHE_PATH.write_text(json.dumps(trimmed, indent=1, ensure_ascii=False))
+    CACHE_PATH.write_text(json.dumps(cache, indent=1, ensure_ascii=False))
 
 
 def build_rss(entries: list) -> str:
@@ -139,9 +167,8 @@ def build_rss(entries: list) -> str:
   <item>
     <title>{sax.escape(e['title'] or '')}</title>
     <link>{sax.escape(e['link'])}</link>
-    <guid isPermaLink="true">{sax.escape(e['guid'])}</guid>
-    <pubDate>{sax.escape(e['pubDate'] or '')}</pubDate>
-    <category>{sax.escape(e.get('category') or '')}</category>
+    <guid isPermaLink="true">{sax.escape(e['link'])}</guid>
+    <pubDate>{sax.escape(e['pub_date_str'])}</pubDate>
     {img_block}
     <description>{sax.escape(e.get('description') or '')}</description>
     <content:encoded><![CDATA[{e['content_html']}]]></content:encoded>
@@ -163,36 +190,44 @@ def build_rss(entries: list) -> str:
 
 
 def main():
-    print("Fetching source feed:", SOURCE_FEED)
-    source_items = parse_source_feed(fetch(SOURCE_FEED).decode("utf-8", errors="replace"))[:MAX_ITEMS]
+    print("Discovering latest articles from:", HOME_URL)
+    links = discover_latest_articles()
+    print(f"Found {len(links)} candidate article links.")
     cache = load_cache()
 
     entries = []
     new_count = 0
-    for item in source_items:
-        cached = cache.get(item["guid"])
+    for link in links:
+        cached = cache.get(link)
         if cached:
-            content_html = cached["content_html"]
-            hero = cached.get("hero") or item["enclosure"]
+            entry = dict(cached)
         else:
-            print("Scraping new article:", item["link"])
-            scraped = scrape_article(item["link"])
+            print("Scraping new article:", link)
+            scraped = scrape_article(link)
             new_count += 1
             time.sleep(REQUEST_DELAY_SECONDS)
             if scraped is None:
-                # fall back to the summary-only description so the item isn't dropped
-                content_html = f"<p>{sax.escape(item['description'])}</p>"
-                hero = item["enclosure"]
-            else:
-                content_html = scraped["content"]
-                hero = scraped["hero"] or item["enclosure"]
-            cache[item["guid"]] = {"content_html": content_html, "hero": hero}
+                print(f"  ! could not extract content, skipping {link}", file=sys.stderr)
+                continue
+            entry = {
+                "title": scraped["title"],
+                "description": scraped["description"],
+                "hero": scraped["hero"],
+                "content_html": scraped["content"],
+                "pub_date_str": format_datetime(scraped["pub_date"]) if scraped["pub_date"] else format_datetime(datetime.now(timezone.utc)),
+            }
+            cache[link] = entry
 
-        entries.append({**item, "content_html": content_html, "hero": hero})
+        entries.append({**entry, "link": link})
+
+    # newest first, using each article's own scraped publish date
+    entries.sort(key=lambda e: parsedate_to_datetime(e["pub_date_str"]), reverse=True)
+    entries = entries[:MAX_ITEMS]
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(build_rss(entries), encoding="utf-8")
-    save_cache(cache)
+    # rebuild the cache from what's actually in the feed, so stale/renamed keys don't pile up
+    save_cache({e["link"]: {k: v for k, v in e.items() if k != "link"} for e in entries})
     print(f"Wrote {OUTPUT_PATH} with {len(entries)} items ({new_count} newly scraped).")
 
 

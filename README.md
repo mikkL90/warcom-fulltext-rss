@@ -4,9 +4,12 @@ Generates a full-text RSS feed (article body + images inline, not just a
 summary) for warhammer-community.com, for personal use in an RSS reader
 like Reeder.
 
-It uses [warcomfeed.link](https://warcomfeed.link) as the "what's new"
-source, then fetches each article page itself and pulls out the real body
-content and images. Runs on stdlib Python only — no dependencies to install.
+It discovers "what's new" directly from the Warhammer Community homepage
+(an earlier version relied on the third-party warcomfeed.link, which
+quietly stopped updating — this version has no third-party dependency in
+the discovery path), then fetches each article page itself and pulls out
+the title, date, hero image and full body content. Runs on stdlib Python
+only — no dependencies to install.
 
 ## Setup (free, ~5 minutes)
 
@@ -23,8 +26,8 @@ content and images. Runs on stdlib Python only — no dependencies to install.
    Run workflow**. After it finishes, `docs/feed.xml` will be populated.
 6. Add `https://<you>.github.io/<repo>/feed.xml` as a feed in Reeder.
 
-After that, GitHub Actions refreshes the feed every 30 minutes on its own,
-for free (public repos get unlimited free Actions minutes).
+After that, GitHub Actions refreshes the feed once a day (07:00 UTC) on
+its own, for free (public repos get unlimited free Actions minutes).
 
 ## Notes
 
